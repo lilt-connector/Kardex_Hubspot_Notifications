@@ -1142,9 +1142,12 @@ ACTIVITY_NOISE = (
 
 
 def kind_activity(dd, kind, since, now, site, state, resuppress,
-                  routes, webhook, dry, quiet_when_idle=True):
-    """Digest of submissions + deliveries, plus individual enriched error alerts,
-    across EVERY connector of one kind rather than a fixed id list."""
+                  routes, webhook, dry, quiet_when_idle=True, only_ids=None):
+    """Digest of submissions + deliveries, plus individual enriched error alerts.
+
+    By default this covers EVERY connector of the given kind. Pass `only_ids`
+    (from ACTIVITY_CONNECTOR_IDS) to narrow it to specific connectors.
+    """
     if not dd.enabled:
         print("kind activity needs DD_API_KEY / DD_APP_KEY", file=sys.stderr)
         return 0
@@ -1152,9 +1155,19 @@ def kind_activity(dd, kind, since, now, site, state, resuppress,
     frm = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     to = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    only_ids = [str(i).strip() for i in (only_ids or []) if str(i).strip()]
+    if len(only_ids) == 1:
+        scope = f"@meta.connectors.id:{only_ids[0]}"
+        label = f"{kind} connector {only_ids[0]}"
+    elif only_ids:
+        scope = "@meta.connectors.id:(" + " OR ".join(only_ids) + ")"
+        label = f"{kind} connectors {', '.join(only_ids)}"
+    else:
+        scope = f"@meta.connectors.kind:{kind}"
+        label = kind
+
     rows, meta = dd._search(
-        f"source:connectors @meta.connectors.kind:{kind} env:production",
-        frm, to, 1000, None)
+        f"source:connectors {scope} env:production", frm, to, 1000, None)
 
     deliveries, submissions, errors = [], [], []
     for r in rows:
@@ -1176,7 +1189,7 @@ def kind_activity(dd, kind, since, now, site, state, resuppress,
             submissions.append(r)
 
     if os.environ.get("VERBOSE"):
-        print(f"--- {kind}: {len(rows)} rows -> {len(submissions)} submission(s), "
+        print(f"--- {label}: {len(rows)} rows -> {len(submissions)} submission(s), "
               f"{len(deliveries)} delivery(s), {len(errors)} error(s)", file=sys.stderr)
 
     posted = 0
@@ -1189,7 +1202,7 @@ def kind_activity(dd, kind, since, now, site, state, resuppress,
             print(text)
         else:
             if not target:
-                print(f"{kind}: no webhook configured", file=sys.stderr)
+                print(f"{label}: no webhook configured", file=sys.stderr)
                 return
             try:
                 post_slack(target, text)
@@ -1204,7 +1217,7 @@ def kind_activity(dd, kind, since, now, site, state, resuppress,
         groups.setdefault(r.get("detail") or r.get("raw_event") or "", []).append(r)
 
     for key, entries in groups.items():
-        dedupe = f"{kind}::activity-error::{key[:120]}"
+        dedupe = f"{label}::activity-error::{key[:120]}"
         prev = state["alerted"].get(dedupe)
         if prev and (now - datetime.fromisoformat(prev)) < timedelta(hours=resuppress):
             continue
@@ -1214,12 +1227,14 @@ def kind_activity(dd, kind, since, now, site, state, resuppress,
             got = ask_claude("(activity feed error)", entries[:25], kind, "", "")
             if got:
                 cause, fix, klass = got
-        ddq = f"source:connectors @meta.connectors.kind:{kind} @level:error"
+        ddq = (f"source:connectors @meta.connectors.id:{only_ids[0]} @level:error"
+               if len(only_ids) == 1 else
+               f"source:connectors @meta.connectors.kind:{kind} @level:error")
         url = f"https://{site}/logs?" + urllib.parse.urlencode({
             "query": ddq, "from_ts": int(since.timestamp() * 1000),
             "to_ts": int(now.timestamp() * 1000), "live": "false",
             "stream_sort": "asc"}, quote_via=urllib.parse.quote)
-        send(f"*{kind} error\n"
+        send(f"*{label} error\n"
              f"Error: {newest.get('raw_event','')}\n"
              f"Cause: {cause}\n"
              f"Suggested fix: {fix}\n"
@@ -1238,7 +1253,7 @@ def kind_activity(dd, kind, since, now, site, state, resuppress,
         langs = sorted({r["tgt_lang"] for r in deliveries if r.get("tgt_lang")})
         files = [r["file"] for r in delivered if r.get("file")][:5]
 
-        lines = [f"*{kind} activity — {frm[11:16]} to {to[11:16]} UTC"]
+        lines = [f"*{label} activity — {frm[11:16]} to {to[11:16]} UTC"]
         if uploaded:
             lines.append(f"📤 Submissions to Lilt: {len(uploaded)}")
         if delivered:
@@ -1252,7 +1267,7 @@ def kind_activity(dd, kind, since, now, site, state, resuppress,
             lines.append(f"⚠️ {len(errors)} error line(s) — see alerts above")
         send("\n".join(lines))
     elif not errors and not quiet_when_idle:
-        send(f"*{kind} activity — nothing in this window.")
+        send(f"*{label} activity — nothing in this window.")
 
     return posted
 
@@ -1287,7 +1302,8 @@ def main():
         n = kind_activity(dd, kind, since, now, site, state, resuppress,
                           parse_routes(os.environ.get("ROUTES", "")),
                           os.environ.get("SLACK_WEBHOOK_URL", ""), dry,
-                          os.environ.get("QUIET_WHEN_IDLE", "1") != "0")
+                          os.environ.get("QUIET_WHEN_IDLE", "1") != "0",
+                          [i for i in os.environ.get("ACTIVITY_CONNECTOR_IDS", "").split(",") if i.strip()])
         state["last_run"] = now.isoformat()
         if not dry:
             save_state(state_file, state)
