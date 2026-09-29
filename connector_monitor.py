@@ -1280,11 +1280,15 @@ def main():
     dry = "--dry" in args
 
     key = os.environ.get("LILT_API_KEY")
-    if not key:
-        raise SystemExit("LILT_API_KEY is not set.")
     ids = [s.strip() for s in os.environ.get("CONNECTOR_IDS", "").split(",") if s.strip()]
-    if not ids:
-        raise SystemExit('CONNECTOR_IDS is not set, e.g. CONNECTOR_IDS="3478,3477"')
+
+    # `activity` reads Datadog and posts to Slack — it never calls the LILT API,
+    # so it needs neither a LILT key nor a connector id list.
+    if cmd != "activity":
+        if not key:
+            raise SystemExit("LILT_API_KEY is not set.")
+        if not ids:
+            raise SystemExit('CONNECTOR_IDS is not set, e.g. CONNECTOR_IDS="3478,3477"')
 
     api = Api(key)
     if cmd == "discover":
