@@ -1,16 +1,8 @@
-# .github/workflows/hubspot-activity.yml
-#
-# Standalone repo: HubSpot activity feed.
-# Submissions, deliveries and errors across EVERY HubSpot connector.
-#
-# Identical to the inRiver setup apart from CONNECTOR_KIND — the script
-# classifies events generically, so one file serves both.
-
 name: HubSpot Activity
 
 on:
   schedule:
-    - cron: "17 * * * *"      # hourly; successes are digested, not per-file
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -33,17 +25,15 @@ jobs:
           DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          VERBOSE: "1"
-          LOOKBACK_HOURS: "6"
 
           CONNECTOR_KIND: "hubspot"
-          ACTIVITY_CONNECTOR_IDS: "6584"   # watch ONLY this connector
-          # CONNECTOR_IDS not needed — `activity` does not call the LILT API
+          ACTIVITY_CONNECTOR_IDS: "6584"
           DATADOG_SITE: "us5.datadoghq.com"
 
           STATE_FILE: "state.json"
-          LOOKBACK_HOURS: "1"         # first run only; afterwards it resumes
-          QUIET_WHEN_IDLE: "1"        # "0" posts a line even when nothing happened
+          LOOKBACK_HOURS: "6"
+          QUIET_WHEN_IDLE: "1"
+          VERBOSE: "1"
         run: python connector_monitor.py activity
 
       - name: Persist dedupe state
