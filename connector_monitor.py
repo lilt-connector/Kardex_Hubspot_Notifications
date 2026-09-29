@@ -1098,6 +1098,7 @@ DELIVERY_EVENTS = (
     "delivery completed successfully",         # hubspot
     "Delivering translated content",           # hubspot
     "Delivering file to connector",            # inriver
+    "File delivered successfully",             # hubspot (configuration-api)
     "inRiver field values updated",            # inriver
 )
 SUBMISSION_EVENTS = (
@@ -1106,6 +1107,7 @@ SUBMISSION_EVENTS = (
     "Batch materialize completed",
     "Successfully materialized",
     "New or changed content detected",         # hubspot
+    "File uploaded successfully",              # hubspot (configuration-api)
 )
 ACTIVITY_NOISE = (
     "HTTP request processed",
