@@ -28,7 +28,7 @@ jobs:
 
       - name: Run HubSpot activity feed
         env:
-          LILT_API_KEY: ${{ secrets.LILT_API_KEY }}
+          LILT_API_KEY: ${{ secrets.KARDEX_LILT_API_KEY }}
           DD_API_KEY: ${{ secrets.DD_API_KEY }}
           DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -36,7 +36,7 @@ jobs:
 
           CONNECTOR_KIND: "hubspot"
           ACTIVITY_CONNECTOR_IDS: "6584"   # watch ONLY this connector
-          CONNECTOR_IDS: "0"          # unused by `activity`, but main() requires it
+          # CONNECTOR_IDS not needed — `activity` does not call the LILT API
           DATADOG_SITE: "us5.datadoghq.com"
 
           STATE_FILE: "state.json"
