@@ -1,0 +1,54 @@
+# .github/workflows/hubspot-activity.yml
+#
+# Standalone repo: HubSpot activity feed.
+# Submissions, deliveries and errors across EVERY HubSpot connector.
+#
+# Identical to the inRiver setup apart from CONNECTOR_KIND — the script
+# classifies events generically, so one file serves both.
+
+name: HubSpot Activity
+
+on:
+  schedule:
+    - cron: "0 * * * *"      # hourly; successes are digested, not per-file
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  activity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run HubSpot activity feed
+        env:
+          LILT_API_KEY: ${{ secrets.LILT_API_KEY }}
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+          CONNECTOR_KIND: "hubspot"
+          CONNECTOR_IDS: "0"          # unused by `activity`, but main() requires it
+          DATADOG_SITE: "us5.datadoghq.com"
+
+          STATE_FILE: "state.json"
+          LOOKBACK_HOURS: "1"         # first run only; afterwards it resumes
+          QUIET_WHEN_IDLE: "1"        # "0" posts a line even when nothing happened
+        run: python connector_monitor.py activity
+
+      - name: Persist dedupe state
+        run: |
+          if [[ -n "$(git status --porcelain state.json)" ]]; then
+            git config user.name  "hubspot-activity"
+            git config user.email "actions@github.com"
+            git add state.json
+            git commit -m "hubspot activity state $(date -u +%FT%TZ)"
+            git push
+          fi
