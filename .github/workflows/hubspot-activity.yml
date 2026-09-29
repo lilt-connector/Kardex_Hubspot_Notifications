@@ -10,7 +10,7 @@ name: HubSpot Activity
 
 on:
   schedule:
-    - cron: "0 * * * *"      # hourly; successes are digested, not per-file
+    - cron: "17 * * * *"      # hourly; successes are digested, not per-file
   workflow_dispatch:
 
 permissions:
