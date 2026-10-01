@@ -312,6 +312,64 @@ CLASS: unknown. Do not speculate beyond what the logs show."""
     return out["CAUSE"], out.get("FIX", "See the Datadog link."), klass + " (AI)"
 
 
+def job_detail(api, job_id):
+    """Pull target languages, file count and workflow from the job record.
+
+    STRICT ALLOWLIST. GET /connectors/configuration/jobs/{id} returns the whole
+    connector config, which includes live Slack webhook URLs. Only the keys
+    named below are ever read out — never the raw object, and never anything
+    matching token/key/secret/webhook.
+    """
+    try:
+        cfg = api.get(JOB_PATH.format(job_id=job_id))
+    except Exception:
+        return {}
+    if not isinstance(cfg, dict):
+        return {}
+
+    out = {}
+
+    # Target locales: prefer the Lilt-side ones from target_memories.
+    tm = cfg.get("target_memories")
+    if isinstance(tm, dict) and tm:
+        out["targets"] = sorted(tm.keys())
+    else:
+        lm = cfg.get("lilt_external_locale_map")
+        if isinstance(lm, dict) and lm:
+            out["targets"] = sorted(lm.keys())
+        else:
+            for k, v in cfg.items():
+                if k.endswith("_language_includes") and isinstance(v, list) and v:
+                    out["targets"] = sorted(str(x) for x in v)
+                    break
+
+    files = cfg.get("package_file_includes")
+    if isinstance(files, list):
+        out["file_count"] = len(files)
+        out["files"] = [str(f) for f in files[:5]]
+
+    for src, dst in (("lilt_translation_workflow", "workflow"),
+                     ("project_prefix", "project_prefix"),
+                     ("connector_type", "kind"),
+                     ("lilt_pretranslation", "pretranslation")):
+        if isinstance(cfg.get(src), str):
+            out[dst] = cfg[src]
+
+    # Flag locale mappings that point somewhere unrelated, e.g. fr-FR -> pt-br.
+    lm = cfg.get("lilt_external_locale_map")
+    if isinstance(lm, dict):
+        odd = []
+        for k, v in lm.items():
+            if not isinstance(v, list) or not v:
+                continue
+            base = str(k).split("-")[0].lower()
+            if not any(str(t).split("-")[0].lower() == base for t in v):
+                odd.append(f"{k} → {', '.join(str(t) for t in v)}")
+        if odd:
+            out["locale_warnings"] = odd
+    return out
+
+
 def diagnose(error_msg: str, validation_msg: str, log_events=None):
     """Return (cause, fix, klass).
 
@@ -601,6 +659,9 @@ class Datadog:
                 "etype": etype,
                 "exception": exc,
                 "svc": row.get("attributes", {}).get("service") or attrs.get("service") or "",
+                "org_id": (mo.get("org", {}) or {}).get("id")
+                           or ((mo.get("connectors", {}) or {}).get("org", {}) or {}).get("id") or "",
+                "file_id": (mo.get("file", {}) or {}).get("file_id") or "",
                 "src_lang": lang.get("source") or deliv.get("source_language") or "",
                 "tgt_lang": lang.get("target") or deliv.get("target_language") or "",
                 "file": (deliv.get("filepath") or "").split("/")[-1],
@@ -612,6 +673,9 @@ class Datadog:
                     meta["kind"] = conn["kind"]
                 if (conn.get("org") or {}).get("name"):
                     meta["org"] = conn["org"]["name"]
+                oid = (mo.get("org", {}) or {}).get("id") or (conn.get("org") or {}).get("id")
+                if oid:
+                    meta["org_id"] = oid
                 for key, names in (("kind", ("kind",)), ("org", ("name",)),
                                    ("action", ("action",))):
                     if key not in meta:
@@ -753,7 +817,7 @@ def post_slack(webhook: str, text: str):
         return resp.status
 
 
-def format_alert(job, connector_id, cause, fix, klass, dd_url, count):
+def format_alert(job, connector_id, cause, fix, klass, dd_url, count, detail=None):
     kind = job.get("connector_kind") or job.get("kind") or "unknown"
     org = job.get("org_name") or job.get("orgName") or ""
     org_part = f" · {org}" if org else ""
@@ -761,9 +825,20 @@ def format_alert(job, connector_id, cause, fix, klass, dd_url, count):
     repeat = f"\n:repeat: {count} failures with this same error" if count > 1 else ""
     # Angle brackets are REQUIRED. Without them Slack absorbs following text
     # into the URL and the Datadog query breaks.
+    detail = detail or {}
+    extra = ""
+    if detail.get("targets"):
+        extra += f"\nTarget languages: {', '.join(detail['targets'])}"
+    if detail.get("file_count") is not None:
+        extra += f"\nFiles: {detail['file_count']}"
+    if detail.get("workflow"):
+        extra += f"\nWorkflow: {detail['workflow']}"
+    if detail.get("locale_warnings"):
+        extra += "\n:warning: Suspicious locale mapping: " + "; ".join(detail["locale_warnings"])
+
     return (
         f"{header}\n"
-        f"Connector: `{connector_id}`{org_part} · {kind}\n"
+        f"Connector: `{connector_id}`{org_part} · {kind}{extra}\n"
         f"Error: {job.get('errorMsg', '(none)')}\n"
         f"Cause: {cause}\n"
         f"Suggested fix: {fix}\n"
@@ -866,8 +941,20 @@ def cmd_run(api: Api, connector_ids, dry: bool):
             payload = api.get(JOBS_LIST_PATH.format(connector_id=cid) +
                               ("&" if "?" in JOBS_LIST_PATH else "?") + "status=failed&limit=50")
         except urllib.error.HTTPError as e:
-            print(f"connector {cid}: jobs list failed HTTP {e.code} "
-                  f"(run `discover` and fix JOBS_LIST_PATH)", file=sys.stderr)
+            if e.code == 404:
+                # The path is known good, so a 404 means this connector is not
+                # visible to this API key — almost always because it belongs to
+                # a different org. Datadog has no such scoping, so the
+                # `activity` command can still watch it.
+                print(f"connector {cid}: not visible to this LILT API key "
+                      f"(likely another org). Use the `activity` command for it.",
+                      file=sys.stderr)
+            elif e.code in (401, 403):
+                print(f"connector {cid}: LILT API rejected the key (HTTP {e.code})",
+                      file=sys.stderr)
+            else:
+                print(f"connector {cid}: jobs list failed HTTP {e.code}",
+                      file=sys.stderr)
             continue
         except Exception as e:
             print(f"connector {cid}: {e}", file=sys.stderr)
@@ -953,8 +1040,9 @@ def cmd_run(api: Api, connector_ids, dry: bool):
                 if got:
                     cause, fix, klass = got
 
+            detail = job_detail(api, job.get("id"))
             dd_url = datadog_link(job.get("id"), created, updated, site, cid)
-            text = format_alert(job, cid, cause, fix, klass, dd_url, len(entries))
+            text = format_alert(job, cid, cause, fix, klass, dd_url, len(entries), detail)
 
             if dry:
                 target = webhook_for(cid, routes, webhook) if routes else webhook
@@ -1255,18 +1343,44 @@ def kind_activity(dd, kind, since, now, site, state, resuppress,
         langs = sorted({r["tgt_lang"] for r in deliveries if r.get("tgt_lang")})
         files = [r["file"] for r in delivered if r.get("file")][:5]
 
-        lines = [f"*{label} activity — {frm[11:16]} to {to[11:16]} UTC"]
+        cid_shown = only_ids[0] if len(only_ids) == 1 else (
+            str(sorted({r.get("conn_id") for r in rows if r.get("conn_id")})[0])
+            if any(r.get("conn_id") for r in rows) else "-")
+        org_id = meta.get("org_id") or next(
+            (r["org_id"] for r in rows if r.get("org_id")), "")
+
+        # Files: submissions carry meta.file.name, deliveries carry the filepath.
+        named = [r["file"] for r in (delivered + uploaded) if r.get("file")]
+        n_files = len(named) or (len(delivered) + len(uploaded))
+
+        ddq = (f"source:connectors @meta.connectors.id:{cid_shown}"
+               if cid_shown != "-" else
+               f"source:connectors @meta.connectors.kind:{kind}")
+        dd_url = f"https://{site}/logs?" + urllib.parse.urlencode({
+            "query": ddq,
+            "from_ts": int(since.timestamp() * 1000),
+            "to_ts": int(now.timestamp() * 1000),
+            "live": "false", "stream_sort": "asc",
+        }, quote_via=urllib.parse.quote)
+
+        lines = [f"*{label} activity — {frm[11:16]} to {to[11:16]} UTC",
+                 f"Connector: `{cid_shown}` · {kind}"
+                 + (f" · org `{org_id}`" if org_id else "")]
         if uploaded:
             lines.append(f"📤 Submissions to Lilt: {len(uploaded)}")
         if delivered:
             lines.append(f"📥 Deliveries to {kind}: {len(delivered)}")
+        lines.append(f"Files: {n_files}")
         if langs:
-            lines.append(f"Languages: {', '.join(langs)}")
-        if files:
-            lines.append("Files: " + ", ".join(f"`{f}`" for f in files)
-                         + (" …" if len(delivered) > 5 else ""))
+            lines.append(f"Target languages: {', '.join(langs)}")
+        if named:
+            lines.append("  " + "\n  ".join(f"• `{f}`" for f in named[:5])
+                         + (f"\n  … and {len(named)-5} more" if len(named) > 5 else ""))
         if errors:
             lines.append(f"⚠️ {len(errors)} error line(s) — see alerts above")
+        lines.append("")
+        lines.append(f"Lilt: <https://lilt.com/app/manage/connectors|Connectors in Lilt>")
+        lines.append(f"DataDog: <{dd_url}>")
         send("\n".join(lines))
     elif not errors and not quiet_when_idle:
         send(f"*{label} activity — nothing in this window.")
@@ -1291,7 +1405,25 @@ def main():
             raise SystemExit('CONNECTOR_IDS is not set, e.g. CONNECTOR_IDS="3478,3477"')
 
     api = Api(key)
-    if cmd == "discover":
+    if cmd == "job":
+        # Dump one job record so we can see which fields the detail endpoint
+        # carries — target languages and the Lilt job id are NOT in the logs,
+        # so this is the only place they might be available.
+        if len(args) < 2:
+            raise SystemExit("usage: connector_monitor.py job <job_id>")
+        jid = args[1]
+        for path in (JOB_PATH.format(job_id=jid),
+                     f"/connectors/configuration/jobs/{jid}/stats",
+                     f"/connectors/configuration/jobs/{jid}/projects"):
+            try:
+                data = api.get(path)
+                print(f"\n=== OK {path}")
+                print(json.dumps(data, indent=2)[:4000])
+            except urllib.error.HTTPError as e:
+                print(f"=== {e.code} {path}")
+            except Exception as e:
+                print(f"=== ERR {path} ({e.__class__.__name__})")
+    elif cmd == "discover":
         cmd_discover(api, ids)
     elif cmd == "activity":
         kind = os.environ.get("CONNECTOR_KIND", "inriver")
