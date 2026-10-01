@@ -17,18 +17,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Check Datadog auth
-        env:
-          DD_API_KEY: ${{ secrets.DD_API_KEY }}
-          DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
-        run: |
-          echo "api key length: ${#DD_API_KEY}"
-          echo "app key length: ${#DD_APP_KEY}"
-          echo "--- validate api key only ---"
-          curl -s -o /dev/null -w "%{http_code}\n" \
-            -H "DD-API-KEY: $DD_API_KEY" \
-            "https://api.us5.datadoghq.com/api/v1/validate"
             
       - name: Run HubSpot activity feed
         env:
